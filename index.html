@@ -1,0 +1,414 @@
+<html>
+<head>
+<title>Web Camera Control</title>
+<meta charset="UTF-8">
+<style>
+    /* (CSS styles) */
+    html, body { font-family: sans-serif; background-color: #3C3C3C; color: #F0F0F0; margin: 0; height: 100%; overflow: hidden; }
+    #container { display: flex; flex-wrap: wrap; width: 100%; height: 100%; }
+    #stream-container { flex: 3; min-width: 500px; padding: 10px; box-sizing: border-box; display: flex; flex-direction: column; }
+    #stream { width: 100%; height: auto; border: 1px solid #5A5A5A; background-color: #000; max-height: calc(100vh - 60px); }
+    
+    /* 主控制區塊容器 */
+    #controls { 
+        flex: 2; min-width: 480px;
+        display: flex;
+        flex-direction: column; 
+        gap: 10px; 
+        padding: 10px;
+        box-sizing: border-box; height: 100%; overflow-y: auto; 
+    }
+
+    /* 雙欄佈局容器 */
+    #panels-wrapper {
+        display: flex;
+        flex-direction: row; 
+        gap: 10px;
+        width: 100%;
+        align-items: flex-start; 
+    }
+
+    /* 單一欄位 (左欄或右欄) */
+    .panel-column {
+        flex: 1; 
+        display: flex;
+        flex-direction: column; 
+        gap: 10px; 
+        min-width: 0;
+    }
+
+    .control-group { 
+        background-color: #4A4A4A; border-radius: 5px; padding: 10px; 
+        margin: 0; 
+        width: 100%; 
+        box-sizing: border-box;
+    }
+
+    .control-group h3 { margin-top: 0; border-bottom: 1px solid #6E6E6E; padding-bottom: 5px; }
+    button { background-color: #5A5A5A; color: #F0F0F0; border: none; border-radius: 5px; padding: 10px; margin: 5px; cursor: pointer; width: calc(100% - 10px); box-sizing: border-box; }
+    button:hover { background-color: #6E6E6E; }
+    button.rec-on { background-color: #A00000; font-weight: bold; }
+    button.light-on { background-color: #E0B400; color: #2D2D2D; font-weight: bold; }
+    button.autofocus { background-color: #6A0DAD; color: white; font-weight: bold; }
+    button.autofocus-on { background-color: #9A32CD; font-weight: bold; }
+    button.exit-btn { background-color: #B22222; color: white; font-weight: bold; }
+    button.exit-btn:hover { background-color: #E04040; }
+    
+    /* 自動背景扣除按鈕的 "ON" 狀態顏色 (深青色) */
+    button.bg-subtract-on { background-color: #008B8B; color: white; font-weight: bold; }
+    
+    #steps_input { width: 60px; text-align: center; background-color: #5A5A5A; color: #F0F0F0; border: 1px solid #777; }
+    #status-bar { position: fixed; bottom: 0; left: 0; width: 100%; background-color: #2D2D2D; padding: 5px 10px; font-size: 12px; }
+    .motor-row { text-align: center; margin-bottom: 10px; }
+    .motor-layout { display: flex; justify-content: space-around; align-items: center; }
+    .motor-xy { display: flex; flex-direction: column; align-items: center; }
+    .motor-xy button { width: 60px; padding: 8px; }
+    .xy-mid { display: flex; }
+    .motor-z { display: flex; flex-direction: column; }
+    .motor-z button { width: 60px; height: 60px; }
+    .setting-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+    .setting-row label { margin-right: 10px; }
+    .setting-row select, .setting-row input[type=number] { flex: 1; background-color: #5A5A5A; color: #F0F0F0; border: 1px solid #777; }
+    .setting-row input[type=range] { flex: 2; }
+    
+    .toggle-row { display: flex; justify-content: center; align-items: center; padding: 5px 0 10px 0; }
+    .toggle-row label { font-weight: bold; margin-right: 10px; }
+    #aec-toggle { width: 20px; height: 20px; }
+    #monitor-toggle { width: 20px; height: 20px; margin-left: 10px; }
+</style>
+</head>
+<body>
+    <div id="container">
+        <div id="stream-container"> <img src="stream.mjpg" id="stream" /> <div id="ev-status">EV Comp: 1.00x</div> </div>
+        
+        <div id="controls">
+            <div id="panels-wrapper">
+                
+                <div class="panel-column">
+                    <div class="control-group"> 
+                        <h3>Settings</h3> 
+                        <div class="setting-row"> <label for="res-select">Resolution:</label> <select id="res-select"> <option value="Low (410x308)">Low (410x308)</option> <option value="Medium (820x616)">Medium (820x616)</option> <option value="High (1024x768)">High (1024x768)</option> <option value="Full (1640x1232)">Full (1640x1232)</option></select> </div> 
+                        <div class="setting-row"> <label for="fps-select">Preview FPS:</label> <select id="fps-select"> <option value="15">15 FPS</option> <option value="30">30 FPS</option> <option value="60">60 FPS</option> </select> </div> 
+                        <button id="apply-settings-btn" onclick="applySettings()">Apply Settings</button> 
+                    </div>
+
+                    <div class="control-group"> 
+                        <h3>Light Source</h3> 
+                        <div style="display: flex; justify-content: space-between;">
+                            <button id="light-bf-btn" onclick="control('light_bf')" style="width: 48%;">Bright Field</button> 
+                            <button id="light-fluo-btn" onclick="control('light_fluo')" style="width: 48%;">Fluorescence</button> 
+                        </div>
+                    </div>
+
+                    <div class="control-group"> 
+                        <h3>Capture & Protocol</h3> 
+                        <button onclick="control('capture')">Capture Image</button> 
+                        <button id="rec-btn" onclick="control('record')">Start Recording</button> 
+                        
+                        <hr style="border-color:#6E6E6E; margin: 15px 0 10px 0;">
+                        <h4>piFP XY-Scan Protocol</h4>
+                        <div style="display: flex; gap: 10px; margin-bottom: 10px; align-items: center;">
+                            <label for="protocol-images">Total Images (N^2):</label>
+                            <select id="protocol-images" style="flex: 1;">
+                                <option value="25">25 (5x5)</option>
+                                <option value="49">49 (7x7)</option>
+                            </select>
+                        </div>
+                        
+                        <button id="protocol-btn" class="autofocus" onclick="control('start_protocol')">
+                            Start Protocol (AF/Capture)
+                        </button>
+                        <button id="cancel-protocol-btn" onclick="control('cancel_protocol')" disabled>
+                            Cancel Protocol (Return to Center)
+                        </button>
+                    </div>
+
+                    <div class="control-group"> 
+                        <h3>System</h3> 
+                        <button id="exit-btn" class="exit-btn" onclick="control('exit_app')">Shutdown Server</button> 
+                    </div>
+                </div>
+
+                <div class="panel-column">
+                    <div class="control-group"> 
+                        <h3>Calibration & Focus</h3> 
+                        <button onclick="control('awb')">AWB (Flat Field)</button> 
+                        
+                        <button id="bg-subtract-btn" onclick="toggleBgSubtract()">
+                            Auto Background Subtract (OFF)
+                        </button>
+
+                        <button id="autofocus-btn" class="autofocus" onclick="control('autofocus')">Run Auto Focus</button> 
+                        
+                        <div class="toggle-row" style="margin-top: 10px; border-top: 1px solid #6E6E6E; padding-top: 10px;">
+                            <label for="monitor-toggle">Monitor Focus (Anti-Drift)</label>
+                            <input type="checkbox" id="monitor-toggle" onchange="toggleMonitor(this.checked)">
+                        </div>
+                    </div>
+
+                    <div class="control-group">
+                        <h3>Manual Exposure</h3>
+                        <div class="toggle-row">
+                            <label for="aec-toggle">Auto Exposure</label>
+                            <input type="checkbox" id="aec-toggle" onchange="toggleAEC(this.checked)">
+                        </div>
+                        <hr style="border-color:#6E6E6E; margin: 5px 0 15px 0;">
+                        <div class="setting-row">
+                            <label for="gain-slider">Gain (<span id="gain-value">2.0</span>x):</label>
+                            <input type="range" id="gain-slider" min="1.0" max="10.7" step="0.1" value="2.0" oninput="updateGainValue(this.value)">
+                        </div>
+                        <div class="setting-row">
+                            <label for="exp-input">Exp (ms):</label>
+                            <input type="number" id="exp-input" min="10" max="11000" value="100">
+                        </div>
+                        <button onclick="applyManualExposure()">Apply Manual</button>
+                        <hr style="border-color:#6E6E6E; margin: 15px 0 10px 0;">
+                        <label>Digital EV Comp:</label>
+                        <div style="display: flex; justify-content: space-between;">
+                            <button onclick="control('ev_down')" style="width: 48%;">- EV</button>
+                            <button onclick="control('ev_up')" style="width: 48%;">+ EV</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="control-group"> 
+                <h3>Motor Control</h3> 
+                <div class="motor-row"> Steps (Microsteps): <input type="number" id="steps_input" value="100"> </div>
+                <div class="motor-layout"> 
+                    <div class="motor-xy"> 
+                        <button onclick="control('move_y_1')">▲ Y</button> 
+                        <div class="xy-mid"> 
+                            <button onclick="control('move_x_-1')">◀ X</button> 
+                            <button onclick="control('move_x_1')">X ▶</button> 
+                        </div> 
+                        <button onclick="control('move_y_-1')">▼ Y</button> 
+                    </div> 
+                    <div class="motor-z"> 
+                        <button onclick="control('move_z_1')">▲ Z</button> 
+                        <button onclick="control('move_z_-1')">▼ Z</button> 
+                    </div> 
+                </div> 
+            </div>
+
+        </div>
+    </div>
+    <div id="status-bar">Status: Initializing Web UI...</div>
+
+<script>
+    let isRecording = false;
+    let isBfLightOn = false;
+    let isFluoLightOn = false;
+    let isFocusing = false;
+    let afStatusPoller = null; 
+    let isBgSubtractOn = false;
+    let isProtocolRunning = false; 
+    
+    function updateStatus(text) { document.getElementById('status-bar').innerText = "Status: " + text; }
+    function updateEv(ev) { document.getElementById('ev-status').innerText = "EV Comp: " + ev; }
+    function updateGainValue(val) {
+        document.getElementById('gain-value').innerText = parseFloat(val).toFixed(1);
+    }
+
+    // 【修正】文字改為 Auto Background Subtract
+    function updateBgSubtractButton() {
+        const btn = document.getElementById('bg-subtract-btn');
+        btn.classList.toggle('bg-subtract-on', isBgSubtractOn);
+        btn.innerText = isBgSubtractOn ? "Auto Background Subtract (ON)" : "Auto Background Subtract (OFF)";
+    }
+
+    async function toggleBgSubtract() {
+        isBgSubtractOn = !isBgSubtractOn; 
+        updateBgSubtractButton(); 
+        await control('toggle_bg_subtract');
+    }
+    
+    async function toggleAEC(isAuto) {
+        if (isAuto) {
+            updateStatus("Resetting to Auto Exposure...");
+            await control('reset_auto');
+        } else {
+            updateStatus("Locking current exposure...");
+            await control('aec_lock');
+        }
+    }
+
+    async function toggleMonitor(isEnabled) {
+        updateStatus(isEnabled ? "Enabling Focus Monitor..." : "Disabling Focus Monitor...");
+        await control('toggle_monitor', { enabled: isEnabled });
+    }
+
+    async function applyManualExposure() {
+        document.getElementById('aec-toggle').checked = false; 
+        const gain = document.getElementById('gain-slider').value;
+        const exp_ms = document.getElementById('exp-input').value;
+        updateStatus(`Applying Manual: ${gain}x, ${exp_ms}ms...`);
+        await control('set_manual_exposure', { gain: gain, exp: exp_ms });
+    }
+
+    async function applySettings() {
+        const resKey = document.getElementById('res-select').value;
+        const fpsKey = document.getElementById('fps-select').value;
+        const btn = document.getElementById('apply-settings-btn');
+        btn.disabled = true; btn.innerText = "Applying...";
+        updateStatus(`Applying: ${resKey} @ ${fpsKey} FPS...`);
+        await control('apply_settings', { res: resKey, fps: fpsKey });
+        btn.disabled = false; btn.innerText = "Apply Settings";
+    }
+
+    function startAfPoller() {
+        if (afStatusPoller) { clearInterval(afStatusPoller); }
+        afStatusPoller = setInterval(async () => {
+            try {
+                const response = await fetch('/control?cmd=get_status');
+                const status = await response.json();
+                if (status.af_finished) stopAfPoller(status.message); 
+            } catch (e) { console.error("AF Polling error:", e); stopAfPoller("Error polling AF status."); }
+        }, 1000); 
+    }
+
+    function stopAfPoller(finalStatus = null) {
+        if (afStatusPoller) { clearInterval(afStatusPoller); afStatusPoller = null; }
+        isFocusing = false;
+        const afBtn = document.getElementById('autofocus-btn');
+        afBtn.innerText = "Run Auto Focus";
+        afBtn.classList.remove('autofocus-on');
+        if (finalStatus) { updateStatus(finalStatus); }
+    }
+
+    async function control(cmd, params = {}) {
+        if (cmd === 'exit_app') {
+            if (!confirm("Shutdown the server?")) return;
+            updateStatus("Sending shutdown command...");
+        }
+        let value = 0;
+        if (cmd.startsWith('move_')) { 
+            value = document.getElementById('steps_input').value; 
+        }
+        
+        const afBtn = document.getElementById('autofocus-btn');
+        const protocolBtn = document.getElementById('protocol-btn');
+        const cancelProtocolBtn = document.getElementById('cancel-protocol-btn');
+
+        if (cmd === 'autofocus') {
+            if (isFocusing) {
+                updateStatus("Cancelling AF...");
+                afBtn.innerText = "Cancelling...";
+            } else {
+                isFocusing = true;
+                afBtn.innerText = "Focusing... (Click to Cancel)";
+                afBtn.classList.add('autofocus-on'); 
+                startAfPoller(); 
+            }
+        }
+        
+        if (cmd === 'start_protocol') {
+             if (isProtocolRunning) {
+                 updateStatus("Protocol is already running.");
+                 return;
+             }
+             isProtocolRunning = true;
+             protocolBtn.disabled = true;
+             protocolBtn.innerText = "Protocol Running...";
+             cancelProtocolBtn.disabled = false;
+             
+             params.num_images = document.getElementById('protocol-images').value;
+        }
+        
+        if (cmd === 'cancel_protocol') {
+             isProtocolRunning = false;
+             protocolBtn.disabled = false;
+             protocolBtn.innerText = "Start Protocol (AF/Capture)";
+             cancelProtocolBtn.disabled = true;
+        }
+
+
+        let queryString = 'cmd=' + cmd + '&value=' + value;
+        if (cmd === 'apply_settings') queryString += '&res=' + encodeURIComponent(params.res) + '&fps=' + params.fps;
+        if (cmd === 'set_manual_exposure') queryString += '&gain=' + params.gain + '&exp=' + params.exp;
+        if (cmd === 'toggle_monitor') queryString += '&enabled=' + params.enabled;
+        if (cmd === 'start_protocol') queryString += '&num_images=' + params.num_images;
+
+
+        try {
+            const response = await fetch('/control?' + queryString);
+            const status = await response.json(); 
+            
+            if (cmd !== 'get_status') updateStatus(status.message);
+            if (status.ev) updateEv(status.ev);
+
+            if (status.ae_enabled !== undefined) {
+                const isAuto = status.ae_enabled === true;
+                document.getElementById('aec-toggle').checked = isAuto;
+                document.getElementById('gain-slider').disabled = isAuto;
+                document.getElementById('exp-input').disabled = isAuto;
+                if (!isAuto && (cmd === 'get_status' || cmd === 'aec_lock' || cmd === 'set_manual_exposure')) {
+                     if (status.current_gain && status.current_exp_us) {
+                        const gain = parseFloat(status.current_gain);
+                        const exp_ms = parseInt(status.current_exp_us) / 1000.0;
+                        document.getElementById('gain-slider').value = gain;
+                        updateGainValue(gain);
+                        document.getElementById('exp-input').value = Math.round(exp_ms);
+                    }
+                }
+            }
+
+            if (status.bg_subtract_enabled !== undefined && cmd !== 'toggle_bg_subtract') {
+                isBgSubtractOn = status.bg_subtract_enabled;
+                updateBgSubtractButton();
+            }
+
+            if (status.monitor_enabled !== undefined && cmd !== 'toggle_monitor') {
+                document.getElementById('monitor-toggle').checked = status.monitor_enabled;
+            }
+
+            if (cmd === 'get_status') {
+                if (status.current_res_key) {
+                    document.getElementById('res-select').value = status.current_res_key;
+                    document.getElementById('fps-select').value = status.current_fps_key;
+                }
+            }
+            
+            if (cmd === 'record') {
+                isRecording = !isRecording;
+                const recBtn = document.getElementById('rec-btn');
+                recBtn.classList.toggle('rec-on', isRecording);
+                recBtn.innerText = isRecording ? "Stop Recording" : "Start Recording";
+            }
+            if (cmd === 'light_bf') {
+                isBfLightOn = !isBfLightOn;
+                document.getElementById('light-bf-btn').classList.toggle('light-on', isBfLightOn);
+            }
+            if (cmd === 'light_fluo') {
+                isFluoLightOn = !isFluoLightOn;
+                document.getElementById('light-fluo-btn').classList.toggle('light-on', isFluoLightOn);
+            }
+            
+            if (status.af_finished && !isProtocolRunning) {
+                 stopAfPoller(status.message);
+            }
+            
+            if (status.message.includes("Protocol: Complete")) {
+                 isProtocolRunning = false;
+                 protocolBtn.disabled = false;
+                 protocolBtn.innerText = "Start Protocol (AF/Capture)";
+                 cancelProtocolBtn.disabled = true;
+            }
+
+            if (cmd === 'exit_app') {
+                 document.getElementById('exit-btn').disabled = true;
+                 document.getElementById('exit-btn').innerText = "Shutting down...";
+            }
+        } catch (error) { console.error('Error:', error); }
+    }
+    window.onload = () => {
+        updateStatus("Web UI Ready.");
+        document.getElementById('gain-slider').value = 2.0; updateGainValue(2.0);
+        document.getElementById('exp-input').value = 100;
+        isBgSubtractOn = false;
+        control('get_status'); 
+        isFocusing = false; stopAfPoller();
+    };
+</script>
+</body>
+</html>
