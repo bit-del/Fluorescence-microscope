@@ -68,7 +68,7 @@ FOCUS_STEPS_DRIFT = [
 
 # --- Acquisition Protocol Settings ---
 CAPTURE_FOLDER = "/home/pi/Desktop/GUI/pifp_data"
-PROTOCOL_RANGE_UM = 15        
+PROTOCOL_RANGE_UM = 100        
 PROTOCOL_NUM_IMAGES = 25       
 
 # --- Correction Settings (新增) ---

@@ -7,7 +7,6 @@ import threading
 
 from config import (GPIO, RPI_GPIO_AVAILABLE, STEPS_PER_UM_Z, STEPS_PER_UM_XY)
 
-# LightControl 保持不變...
 class LightControl:
     def __init__(self, bf_pin, fluo_pin, status_callback):
         self.bf_pin = bf_pin; self.fluo_pin = fluo_pin
@@ -122,7 +121,6 @@ class MotorControl:
                             logging.warning(f"Command {final_command} cancelled.")
                             return
                         
-                        # 【Crash Fix】 Check if serial is still valid before reading
                         if not self.ser or not self.ser.is_open:
                             return
 
@@ -139,6 +137,9 @@ class MotorControl:
                             logging.error(f"Read error: {e}")
                             return
                         
+                        # [優化] 避免 Busy Wait 吃滿 CPU
+                        time.sleep(0.01)
+                        
                     if not silent:
                         self.status_callback(f"Warning: No ACK for {final_command}")
                     logging.warning(f"No ACK from Arduino for {final_command}")
@@ -154,5 +155,5 @@ class MotorControl:
         with self.lock:
             if self.ser and self.ser.is_open:
                 self.ser.close()
-                self.ser = None # Explicitly set to None
+                self.ser = None 
                 logging.info("Serial port closed.")

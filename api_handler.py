@@ -78,7 +78,7 @@ class ApiHandler:
                     new_state = not self.server.fluo_light_state
                     self.light.set_light(self.light.fluo_pin, new_state)
                     self.server.fluo_light_state = new_state
-                    # 【新增】通知 Worker 切換 AF 模式
+                    # 通知 Worker 切換 AF 模式
                     if cam_worker is not None:
                         QMetaObject.invokeMethod(cam_worker, "set_fluo_mode", Qt.QueuedConnection, Q_ARG(bool, new_state))
                     status_msg = f"Fluo {'ON' if new_state else 'OFF'}"
@@ -129,9 +129,21 @@ class ApiHandler:
                 
                 elif cmd == 'start_protocol':
                     self._force_clear_folder(config.CAPTURE_FOLDER)
-                    num_images = params.get('num_images', ['25'])[0]
-                    QMetaObject.invokeMethod(self.cam_manager.camera_worker, "start_acquisition_protocol", Qt.QueuedConnection, Q_ARG(str, num_images))
-                    status_msg = f"Protocol ({num_images}) Started."
+                    
+                    # 接收 grid_n, range_um 以及 mode
+                    grid_n = params.get('grid_n', ['5'])[0]
+                    range_um = params.get('range_um', ['1000'])[0]
+                    mode = params.get('mode', ['stitching'])[0] # 預設為 stitching
+                    
+                    QMetaObject.invokeMethod(
+                        self.cam_manager.camera_worker, 
+                        "start_acquisition_protocol", 
+                        Qt.QueuedConnection, 
+                        Q_ARG(str, grid_n),
+                        Q_ARG(str, range_um),
+                        Q_ARG(str, mode) # 傳遞 mode
+                    )
+                    status_msg = f"Protocol ({mode}, {grid_n}x{grid_n}) Started."
 
                 elif cmd == 'cancel_protocol':
                     QMetaObject.invokeMethod(self.cam_manager.camera_worker, "cancel_acquisition_protocol", Qt.QueuedConnection); status_msg = "Protocol Cancelled."

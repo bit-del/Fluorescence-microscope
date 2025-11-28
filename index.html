@@ -107,19 +107,35 @@
                         
                         <hr style="border-color:#6E6E6E; margin: 15px 0 10px 0;">
                         <h4>piFP XY-Scan Protocol</h4>
-                        <div style="display: flex; gap: 10px; margin-bottom: 10px; align-items: center;">
-                            <label for="protocol-images">Total Images (N^2):</label>
-                            <select id="protocol-images" style="flex: 1;">
-                                <option value="25">25 (5x5)</option>
-                                <option value="49">49 (7x7)</option>
+                        
+                        <div class="setting-row">
+                            <label for="protocol-mode">Mode:</label>
+                            <select id="protocol-mode" onchange="updateProtocolPresets()">
+                                <option value="stitching">Large Area Stitching</option>
+                                <option value="reconstruction">Fluo Reconstruction</option>
+                                <option value="custom">Custom</option>
                             </select>
                         </div>
+
+                        <div class="setting-row">
+                            <label for="protocol-range">Range (µm):</label>
+                            <input type="number" id="protocol-range" value="2000" step="100" style="width: 70px;">
+                        </div>
+
+                        <div class="setting-row">
+                            <label for="protocol-grid">Grid (N×N):</label>
+                            <input type="number" id="protocol-grid" value="5" min="2" max="20" style="width: 70px;">
+                        </div>
                         
+                        <div style="font-size: 11px; color: #AAA; margin-bottom: 10px; text-align: right;">
+                            Result: <span id="protocol-calc-info">...</span>
+                        </div>
+
                         <button id="protocol-btn" class="autofocus" onclick="control('start_protocol')">
-                            Start Protocol (AF/Capture)
+                            Start Protocol
                         </button>
                         <button id="cancel-protocol-btn" onclick="control('cancel_protocol')" disabled>
-                            Cancel Protocol (Return to Center)
+                            Cancel Protocol
                         </button>
                     </div>
 
@@ -210,7 +226,6 @@
         document.getElementById('gain-value').innerText = parseFloat(val).toFixed(1);
     }
 
-    // 【修正】文字改為 Auto Background Subtract
     function updateBgSubtractButton() {
         const btn = document.getElementById('bg-subtract-btn');
         btn.classList.toggle('bg-subtract-on', isBgSubtractOn);
@@ -254,6 +269,35 @@
         updateStatus(`Applying: ${resKey} @ ${fpsKey} FPS...`);
         await control('apply_settings', { res: resKey, fps: fpsKey });
         btn.disabled = false; btn.innerText = "Apply Settings";
+    }
+
+    // Protocol 設定邏輯
+    function updateProtocolPresets() {
+        const mode = document.getElementById('protocol-mode').value;
+        const rangeInput = document.getElementById('protocol-range');
+        const gridInput = document.getElementById('protocol-grid');
+
+        if (mode === 'stitching') {
+            rangeInput.value = 2000; 
+            gridInput.value = 5;
+        } else if (mode === 'reconstruction') {
+            rangeInput.value = 100;
+            gridInput.value = 10;
+        }
+        updateCalcInfo();
+    }
+
+    function updateCalcInfo() {
+        const range = parseFloat(document.getElementById('protocol-range').value) || 0;
+        const n = parseInt(document.getElementById('protocol-grid').value) || 0;
+        const total = n * n;
+        let stepStr = "N/A";
+        
+        if (n > 1) {
+            const step = range / (n - 1);
+            stepStr = step.toFixed(1) + "µm";
+        }
+        document.getElementById('protocol-calc-info').innerText = `${total} images, step ~${stepStr}`;
     }
 
     function startAfPoller() {
@@ -312,23 +356,28 @@
              protocolBtn.innerText = "Protocol Running...";
              cancelProtocolBtn.disabled = false;
              
-             params.num_images = document.getElementById('protocol-images').value;
+             // 從輸入框取得參數
+             params.mode = document.getElementById('protocol-mode').value;
+             params.range_um = document.getElementById('protocol-range').value;
+             params.grid_n = document.getElementById('protocol-grid').value;
         }
         
         if (cmd === 'cancel_protocol') {
              isProtocolRunning = false;
              protocolBtn.disabled = false;
-             protocolBtn.innerText = "Start Protocol (AF/Capture)";
+             protocolBtn.innerText = "Start Protocol";
              cancelProtocolBtn.disabled = true;
         }
-
 
         let queryString = 'cmd=' + cmd + '&value=' + value;
         if (cmd === 'apply_settings') queryString += '&res=' + encodeURIComponent(params.res) + '&fps=' + params.fps;
         if (cmd === 'set_manual_exposure') queryString += '&gain=' + params.gain + '&exp=' + params.exp;
         if (cmd === 'toggle_monitor') queryString += '&enabled=' + params.enabled;
-        if (cmd === 'start_protocol') queryString += '&num_images=' + params.num_images;
-
+        
+        // 傳遞 Protocol 參數
+        if (cmd === 'start_protocol') {
+            queryString += '&mode=' + params.mode + '&range_um=' + params.range_um + '&grid_n=' + params.grid_n;
+        }
 
         try {
             const response = await fetch('/control?' + queryString);
@@ -391,7 +440,7 @@
             if (status.message.includes("Protocol: Complete")) {
                  isProtocolRunning = false;
                  protocolBtn.disabled = false;
-                 protocolBtn.innerText = "Start Protocol (AF/Capture)";
+                 protocolBtn.innerText = "Start Protocol";
                  cancelProtocolBtn.disabled = true;
             }
 
@@ -406,6 +455,12 @@
         document.getElementById('gain-slider').value = 2.0; updateGainValue(2.0);
         document.getElementById('exp-input').value = 100;
         isBgSubtractOn = false;
+        
+        // 初始化 Protocol 輸入監聽
+        document.getElementById('protocol-range').addEventListener('input', updateCalcInfo);
+        document.getElementById('protocol-grid').addEventListener('input', updateCalcInfo);
+        updateProtocolPresets();
+
         control('get_status'); 
         isFocusing = false; stopAfPoller();
     };
