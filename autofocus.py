@@ -2,75 +2,52 @@
 import time
 import logging
 import numpy as np
-import os
-import glob
 import cv2
-import config
 
-# --- 對焦指數計算 ---
+# --- 對焦指數計算 (Metrics) ---
 
-def compute_variance_function(image):
-    """計算影像的變異數 (Variance) 對焦指數"""
-    mean_value = np.mean(image)
-    variance = np.sum((image - mean_value) ** 2)
-    return variance
-
-def compute_brenner_function(image):
-    """計算影像的 Brenner 對焦指數"""
-    image = np.asarray(image, dtype=np.float32)
-    shifted_image = np.roll(image, -2, axis=0)
-    difference = shifted_image - image
-    difference_squared = np.square(difference)
-    brenner_value = np.sum(difference_squared[:-2, :])
-    return brenner_value
-
-def compute_laplacian_function(image):
+def compute_score_fluo(image):
     """
-    [螢光專用] 版本 V6 (去除鬼影版): Morphological Opening + Sobel
+    [螢光專用 - Fluo] 
+    邏輯: Morphological Opening (去鬼影) + Sobel Edge Detection
     """
-    # 1. 轉為浮點數
     img_float = image.astype(np.float32)
 
-    # --- 關鍵步驟 A: 形態學去鬼影 ---
+    # 1. 形態學去鬼影
     kernel_size = 13 
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
     structure_only = cv2.morphologyEx(img_float, cv2.MORPH_OPEN, kernel)
     blurred = cv2.GaussianBlur(structure_only, (5, 5), 0)
 
-    # --- 關鍵步驟 B: 計算結構邊緣 ---
+    # 2. 計算 Sobel 梯度
     gx = cv2.Sobel(blurred, cv2.CV_32F, 1, 0, ksize=3)
     gy = cv2.Sobel(blurred, cv2.CV_32F, 0, 1, ksize=3)
     magnitude = cv2.magnitude(gx, gy)
     
-    # --- 步驟 C: 評分 ---
+    # 3. 取前 0.1% 最亮點
     flat_mag = magnitude.flatten()
     total_pixels = len(flat_mag)
     if total_pixels == 0: return 0.0
     
-    top_n_count = int(total_pixels * 0.001) # 0.1%
+    top_n_count = int(total_pixels * 0.001) 
     if top_n_count < 10: top_n_count = 10
+    
     top_gradients = np.partition(flat_mag, -top_n_count)[-top_n_count:]
     score = np.mean(top_gradients ** 2)
 
     return score
 
-# 【新增】明視野專用
-def compute_variance_of_laplacian(image):
+def compute_score_bf(image):
     """
-    [明視野專用 - 改良版] Laplacian 變異數 + 抗噪
-    加入 Gaussian Blur (5x5) 以濾除高頻雜訊，避免失焦時雜訊分數過高的問題。
+    [明視野專用 - BF]
+    邏輯: Global Variance (全域變異數)
+    原因: 明視野正焦時黑色最深（對比度最高），變異數最大。
     """
-    # 1. 高斯模糊 (關鍵步驟：抹除 Image 008 那種細碎雜訊)
-    # kernel=(5,5) 是顯微鏡常用的參數，能保留結構但殺死雜訊
-    blurred = cv2.GaussianBlur(image, (5, 5), 0)
-    
-    # 2. 計算 Laplacian (偵測邊緣)
-    # 使用 64-bit float 避免溢位
-    laplacian = cv2.Laplacian(blurred, cv2.CV_64F)
-    
-    # 3. 計算變異數 (Variance) 作為分數
-    score = laplacian.var()
-    
+    if len(image.shape) == 3:
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+    # 計算全域變異數
+    score = np.var(image)
     return score
 
 class FocusAlgorithm:
@@ -83,7 +60,7 @@ class FocusAlgorithm:
     def __init__(self, steps_config, status_updater):
         self.steps_config = steps_config
         self.status_updater = status_updater
-        logging.info("Non-blocking FocusAlgorithm initialized.")
+        logging.info("FocusAlgorithm initialized.")
         self.reset()
 
     def reset(self):
@@ -98,8 +75,6 @@ class FocusAlgorithm:
         self.wrong_way_check_done = False 
 
     def start(self):
-        if self.state != self.STATE_IDLE:
-            logging.warning("AF Algorithm: Start called when not idle.")
         self.reset()
         self.state = self.STATE_START_STEP
         self.status_updater("Continuous AF started...")
@@ -116,6 +91,8 @@ class FocusAlgorithm:
         self.current_step_config = self.steps_config[self.current_step_index]
         self.current_step_index += 1
         
+        # 反轉方向：利用這一點，如果在上一步結束時我們剛好在峰值旁邊（Back 1 step），
+        # 反轉後就會直接朝峰值移動。
         self.direction *= -1
         self.last_value = 0
         self.maximum_value = -1 
@@ -161,6 +138,8 @@ class FocusAlgorithm:
             
             if current_value < self.last_value:
                 self.drop_count += 1
+                
+                # --- 情況 A: 剛開始就走錯方向 (Step 1 專用) ---
                 if (check_threshold and self.current_step_index == 1 and self.drop_count == 1 and not self.wrong_way_check_done): 
                     self.wrong_way_check_done = True 
                     self.direction *= -1 
@@ -170,35 +149,42 @@ class FocusAlgorithm:
                     self.maximum_value = current_value
                     self.steps_from_peak = 0 
                     self.drop_count = 0
+                    self.status_updater(f"AF: Wrong direction. Reversing...")
                     return {"type": "MOVE", "command": command}
 
-                elif (check_threshold and self.maximum_value > 0 and current_value / self.maximum_value < 0.7):
+                # --- 情況 B: 分數暴跌 (>30%) ---
+                elif (check_threshold and self.maximum_value > 0 and (current_value / self.maximum_value) < 0.7):
                     if is_last_step:
+                        # 最後一步：必須精確回到峰值
                         back_steps = self.steps_from_peak  
                         step = step_size * self.direction * -1 * back_steps
-                        command = f"z{step}"
-                        self.status_updater(f"AF: Final Step Drop (70%). Returning to Peak ({back_steps} steps): {command}")
-                        self.state = self.STATE_STEPPING_BACK
-                        return {"type": "MOVE", "command": command}
+                        msg = f"AF: Final Step Drop (70%). Back to Peak ({back_steps} steps)."
                     else:
-                        self.status_updater(f"AF: Peak missed (below 70%). Advancing to next step.")
-                        self.state = self.STATE_START_STEP 
-                        return {"type": "WAIT"}
+                        # 中間步驟：只要退回上一步 (Back 1 step)
+                        step = step_size * self.direction * -1
+                        msg = f"AF: Peak missed (70% Drop). Back 1 step to refine."
 
+                    command = f"z{step}"
+                    self.status_updater(msg)
+                    self.state = self.STATE_STEPPING_BACK 
+                    return {"type": "MOVE", "command": command}
+
+                # --- 情況 C: 連續下降兩次 ---
                 elif self.drop_count >= 2:
                     if is_last_step:
-                        back_steps = self.steps_from_peak + 1 
+                        # 最後一步：必須精確回到峰值
+                        back_steps = self.steps_from_peak
                         step = step_size * self.direction * -1 * back_steps
-                        command = f"z{step}"
-                        self.status_updater(f"AF: Final Step Finished. Returning {back_steps} steps to Peak: {command}")
-                        self.state = self.STATE_STEPPING_BACK 
-                        return {"type": "MOVE", "command": command}
+                        msg = f"AF: Final Step (2 drops). Back to Peak ({back_steps} steps)."
                     else:
+                        # 中間步驟：只要退回上一步 (Back 1 step)
                         step = step_size * self.direction * -1
-                        command = f"z{step}"
-                        self.status_updater(f"AF: Peak missed (2 drops). Stepping back {command}, then advancing.")
-                        self.state = self.STATE_STEPPING_BACK 
-                        return {"type": "MOVE", "command": command}
+                        msg = f"AF: Peak passed (2 drops). Back 1 step to refine."
+                    
+                    command = f"z{step}"
+                    self.status_updater(msg)
+                    self.state = self.STATE_STEPPING_BACK 
+                    return {"type": "MOVE", "command": command}
                 
                 else:
                     step = step_size * self.direction * (1.5 if check_threshold else 1.0)
@@ -210,4 +196,5 @@ class FocusAlgorithm:
                 self.last_value = current_value
                 command = f"z{step_size * self.direction}"
                 return {"type": "MOVE", "command": command}
+        
         return {"type": "WAIT"}

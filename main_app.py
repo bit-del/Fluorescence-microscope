@@ -372,7 +372,7 @@ if __name__ == "__main__":
         server_thread = threading.Thread(target=server.serve_forever)
         server_thread.daemon = True
         server_thread.start()
-        logging.info(f"✅ Web server started. Access at http://'raspberry pi ip']/index.html")
+        logging.info(f"✅ Web server started. Access at http://192.168.0.138:8000/index.html")
         logging.info(f"✅ Web server started. Access at http://localhost:8000/index.html")
 
         def shutdown():

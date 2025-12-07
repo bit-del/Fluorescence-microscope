@@ -6,8 +6,8 @@ from PySide6.QtGui import QImage
 
 # 基礎黑電平
 DEFAULT_SENSOR_BLACK = 64.0
-FLUORESCENCE_NOISE_THRESHOLD = 2.0
-FLUORESCENCE_DIGITAL_GAIN = 1.5 
+FLUORESCENCE_NOISE_THRESHOLD = 30
+FLUORESCENCE_DIGITAL_GAIN = 2
 
 def get_raw_channels(buffer, raw_config) -> tuple:
     """ 從 Bayer Raw 資料中提取 R, G, B 通道 (Float32) """

@@ -21,9 +21,8 @@ import config
 from image_processing import (get_raw_channels, apply_correction, 
                               convert_to_qimage, calculate_gain_maps)
 
-from autofocus import (FocusAlgorithm, compute_variance_function, 
-                       compute_brenner_function, compute_laplacian_function,
-                       compute_variance_of_laplacian) 
+# 【修改】 引入修正後的函數名稱
+from autofocus import (FocusAlgorithm, compute_score_bf, compute_score_fluo) 
 from hardware_control import MotorConversion 
 
 class CameraWorker(QObject):
@@ -84,7 +83,7 @@ class CameraWorker(QObject):
         self.io_thread = threading.Thread(target=self._io_worker_loop, daemon=True)
         self.io_thread.start()
 
-        # --- 錄影執行緒 (專用 Queue) --- [新增]
+        # --- 錄影執行緒 (專用 Queue) ---
         self.record_queue = queue.Queue(maxsize=30)
         self.record_thread = threading.Thread(target=self._record_worker_loop, daemon=True)
         self.record_thread.start()
@@ -122,7 +121,6 @@ class CameraWorker(QObject):
         self.center_offset_steps_y = 0
 
     def _load_raw_unmix_tensor(self):
-        """ 載入空間變異 Unmix Tensor """
         try:
             if os.path.exists(config.UNMIX_MATRIX_PATH):
                 data = np.load(config.UNMIX_MATRIX_PATH)
@@ -140,7 +138,6 @@ class CameraWorker(QObject):
             self.raw_unmix_tensor = None
 
     def _ensure_unmix_tensor_size(self, target_h, target_w):
-        """ 確保 Tensor 尺寸與當前相機解析度一致 """
         if self.raw_unmix_tensor is None:
             self.current_unmix_tensor = None
             return
@@ -173,13 +170,12 @@ class CameraWorker(QObject):
             except queue.Empty: continue
             except Exception as e: logging.error(f"IO Loop Critical Error: {e}")
 
-    def _record_worker_loop(self): # [新增]
+    def _record_worker_loop(self):
         logging.info("Record Worker thread started.")
         while self._is_running:
             try:
-                # 阻塞等待影像幀
                 frame_data = self.record_queue.get(timeout=1.0)
-                if frame_data is None: continue # Sentinel for stop if needed
+                if frame_data is None: continue 
                 
                 if self.video_writer is not None:
                     try:
@@ -205,7 +201,7 @@ class CameraWorker(QObject):
     @Slot(bool)
     def set_fluo_mode(self, enabled):
         self.is_fluo_mode = enabled
-        mode_str = "Fluorescence (V6 + Unmix)" if enabled else "Bright Field (Variance)"
+        mode_str = "Fluorescence (V6 + Unmix)" if enabled else "Bright Field (Global Variance)"
         logging.info(f"CameraWorker: Mode switched to {mode_str}")
 
     @Slot()
@@ -309,7 +305,6 @@ class CameraWorker(QObject):
                 processed_rgb = np.stack([r, g, b], axis=-1).astype(np.uint16)
             
             # 5. Output
-            # 優化：將 Video Write 丟入 Queue，不在此處等待
             if self.video_writer is not None: 
                 self._queue_video_frame(processed_rgb)
 
@@ -319,7 +314,6 @@ class CameraWorker(QObject):
                 self._save_image_from_qimage(q_img)
             
             try:
-                # 串流處理 (維持在主執行緒，因為要快速更新)
                 ptr = q_img.constBits()
                 arr = np.array(ptr).reshape(q_img.height(), q_img.width(), 3)
                 frame_to_encode_rgb = arr
@@ -338,8 +332,11 @@ class CameraWorker(QObject):
                         self.monitor_counter = 0
                         image_for_calc = processed_rgb[:, :, 1]
                         
-                        if self.is_fluo_mode: curr_score = compute_laplacian_function(image_for_calc)
-                        else: curr_score = compute_variance_of_laplacian(image_for_calc)
+                        # 【修改】 使用新名稱
+                        if self.is_fluo_mode: 
+                            curr_score = compute_score_fluo(image_for_calc)
+                        else: 
+                            curr_score = compute_score_bf(image_for_calc)
                             
                         if curr_score < (self.reference_focus_score * self.drift_threshold):
                             self.status_updated.emit("Focus drift detected. Re-focusing...")
@@ -355,12 +352,13 @@ class CameraWorker(QObject):
                 image_for_calc = processed_rgb[:, :, 1]
                 self.af_image_count += 1
                 
+                # 【修改】 使用新名稱與變數
                 if self.is_fluo_mode:
-                    metric = compute_laplacian_function(image_for_calc)
-                    method_name = "Fluo(V6)"
+                    metric = compute_score_fluo(image_for_calc)
+                    method_name = "Fluo"
                 else:
-                    metric = compute_variance_of_laplacian(image_for_calc)
-                    method_name = "BF(Var)"
+                    metric = compute_score_bf(image_for_calc)
+                    method_name = "BF"
 
                 g_copy_u8 = cv2.normalize(image_for_calc, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
                 self._queue_af_image_save(g_copy_u8, self.af_image_count)
@@ -427,8 +425,25 @@ class CameraWorker(QObject):
     def start_drift_autofocus(self):
         if self.af_state == "IDLE":
             self.af_algorithm.steps_config = config.FOCUS_STEPS_DRIFT; self._start_af_common()
+    
     def _start_af_common(self):
-        self.af_image_count = 0; self.af_algorithm.start(); self.af_state = "FOCUSING"; self._process_frame() 
+        # 【修改】 加入清除舊 AF 資料夾內容的邏輯
+        try:
+            if os.path.exists(self.af_folder):
+                files = glob.glob(os.path.join(self.af_folder, "*"))
+                for f in files:
+                    try: os.remove(f)
+                    except Exception: pass
+            else:
+                os.makedirs(self.af_folder, exist_ok=True)
+        except Exception as e:
+            logging.error(f"Failed to clear AF folder: {e}")
+
+        self.af_image_count = 0
+        self.af_algorithm.start()
+        self.af_state = "FOCUSING"
+        self._process_frame() 
+
     @Slot()
     def cancel_autofocus(self):
         if self.af_state != "IDLE":
@@ -436,11 +451,10 @@ class CameraWorker(QObject):
             self.af_algorithm.cancel(); self.af_state = "IDLE"; self.af_status_finished.emit()
             
     # --- Protocol Logic ---
-    @Slot(str, str, str) # 接收 mode_str
+    @Slot(str, str, str) 
     def start_acquisition_protocol(self, grid_n_str, range_um_str, mode_str):
         if self.af_state == "IDLE" and self.protocol_state == "IDLE":
             try:
-                # 解析參數
                 n_side = int(grid_n_str)
                 range_um = float(range_um_str)
                 
@@ -450,25 +464,22 @@ class CameraWorker(QObject):
                 
                 self.protocol_total_images = num_images
                 self.protocol_n_side = n_side
-                self.protocol_mode = mode_str # 儲存模式
+                self.protocol_mode = mode_str 
             except ValueError as e: 
                 self.status_updated.emit(f"Error: {e}")
                 return
 
-            # 根據 Range (um) 計算步進
             step_um = range_um / (n_side - 1)
             
             logging.info(f"Protocol Start: Mode={mode_str}, Grid={n_side}x{n_side}, Range={range_um}um, Step={step_um:.2f}um")
 
             self.protocol_x_steps = MotorConversion.um_to_microsteps_xy(step_um) 
-            self.protocol_y_steps = -MotorConversion.um_to_microsteps_xy(step_um) # 注意 Y 軸方向
+            self.protocol_y_steps = -MotorConversion.um_to_microsteps_xy(step_um) 
             
-            # 起始點位移量
             start_move_um = range_um / 2.0
             self.protocol_x_start_steps = -MotorConversion.um_to_microsteps_xy(start_move_um) 
             self.protocol_y_start_steps = MotorConversion.um_to_microsteps_xy(start_move_um) 
             
-            # 初始化狀態
             self.protocol_current_image = 0
             self.protocol_started_by_user = True
             self.protocol_y_count = 0
@@ -493,7 +504,6 @@ class CameraWorker(QObject):
                 
     @Slot()
     def _run_protocol_step(self):
-        # 1. 回到原點邏輯 (結束時)
         if self.protocol_state == "PROTOCOL_MOVE_TO_CENTER_END":
             self.protocol_state = "PROTOCOL_MOVE_TO_CENTER_END_Y"
             return_y_steps = -self.center_offset_steps_y; self._issue_protocol_motor_command(f"sy{return_y_steps}"); return
@@ -502,13 +512,11 @@ class CameraWorker(QObject):
             self.center_offset_steps_x = 0; self.center_offset_steps_y = 0
             self.status_updated.emit("Protocol: Complete."); return
         
-        # 2. 檢查是否結束
         if self.protocol_current_image >= self.protocol_total_images and self.protocol_state == "PROTOCOL_CAPTURE":
             self.protocol_state = "PROTOCOL_MOVE_TO_CENTER_END"
             self.status_updated.emit("Protocol: Finished. Returning..."); return_x_steps = -self.center_offset_steps_x
             self._issue_protocol_motor_command(f"sx{return_x_steps}"); return
 
-        # 3. 初始化移動 (移到左上角)
         elif self.protocol_state == "PROTOCOL_MOVE_TO_CENTER":
             self.protocol_state = "PROTOCOL_MOVE_TO_CENTER_Y"; self._issue_protocol_motor_command(f"sy{self.center_offset_steps_y}")
         elif self.protocol_state == "PROTOCOL_MOVE_TO_CENTER_Y":
@@ -520,16 +528,12 @@ class CameraWorker(QObject):
             self.center_offset_steps_x = self.protocol_x_start_steps; self.center_offset_steps_y = self.protocol_y_start_steps
             self.protocol_state = "PROTOCOL_WAIT_AF"; QMetaObject.invokeMethod(self, "_run_protocol_step", Qt.QueuedConnection); return
         
-        # 4. 對焦與拍照循環
         elif self.protocol_state == "PROTOCOL_WAIT_AF":
             self.status_updated.emit(f"Protocol {self.protocol_current_image+1}/{self.protocol_total_images}: AF...")
             
-            # 【關鍵】根據模式決定 AF 策略
             if hasattr(self, 'protocol_mode') and self.protocol_mode == 'stitching':
-                # Stitching (拼圖) 使用 Full AF 避免高低差失焦
                 QMetaObject.invokeMethod(self, "start_autofocus", Qt.QueuedConnection)
             else:
-                # Reconstruction (重建) 預設使用 Drift AF (較快)
                 QMetaObject.invokeMethod(self, "start_drift_autofocus", Qt.QueuedConnection)
             
             self.protocol_state = "PROTOCOL_AF_RUNNING"
@@ -542,7 +546,6 @@ class CameraWorker(QObject):
             col_index_linear = (self.protocol_current_image - 1) % n 
             col_num = col_index_linear + 1
             
-            # 檔名增加總網格資訊 (光柵掃描座標)
             filename = f"xy_R{row_num:02d}_C{col_num:02d}"
             self._queue_capture(filename); self.status_updated.emit(f"Protocol: Capturing {filename}...")
             
@@ -551,21 +554,19 @@ class CameraWorker(QObject):
                 return 
             
             if self.protocol_current_image % n == 0: 
-                self.protocol_state = "PROTOCOL_MOVE_Y" # 換行
+                self.protocol_state = "PROTOCOL_MOVE_Y" 
             else: 
-                self.protocol_state = "PROTOCOL_MOVE_X" # 下一欄 (向右)
+                self.protocol_state = "PROTOCOL_MOVE_X" 
             
             QMetaObject.invokeMethod(self, "_run_protocol_step", Qt.QueuedConnection)
         
         elif self.protocol_state == "PROTOCOL_MOVE_X":
-            # 光柵掃描：永遠向右
             self.protocol_state = "PROTOCOL_WAIT_AF"
             steps = self.protocol_x_steps 
             self.center_offset_steps_x += steps
             self._issue_protocol_motor_command(f"sx{steps}")
 
         elif self.protocol_state == "PROTOCOL_MOVE_Y":
-            # 換行：Y軸移動，準備 Rewind X
             self.protocol_state = "PROTOCOL_REWIND_X" 
             self.protocol_y_count += 1
             steps_y = self.protocol_y_steps
@@ -573,12 +574,9 @@ class CameraWorker(QObject):
             self._issue_protocol_motor_command(f"sy{steps_y}")
 
         elif self.protocol_state == "PROTOCOL_REWIND_X": 
-            # 快速回捲 X 軸 (回到該 Row 的最左邊)
             self.protocol_state = "PROTOCOL_WAIT_AF"
             n = self.protocol_n_side
-            # 往回走 (n-1) 個間距
             steps_rewind = -1 * self.protocol_x_steps * (n - 1)
-            
             self.center_offset_steps_x += steps_rewind
             self._issue_protocol_motor_command(f"sx{steps_rewind}")
             
@@ -642,17 +640,13 @@ class CameraWorker(QObject):
         self.video_writer.release(); self.video_writer = None; self.status_updated.emit("Recording Stopped.")
 
     def _queue_video_frame(self, rgb_16bit_array):
-        """ 將影像處理與檔案寫入分離，避免阻塞相機循環 """
         try:
             max_val = 65535.0
-            # 這裡只做簡單的正規化與 Resize，這是 CPU bound，但寫入是 IO bound
             normalized = rgb_16bit_array.astype(np.float32) / max_val
             normalized *= self.ev_comp; np.clip(normalized, 0, 1, out=normalized)
             frame_8bit_rgb = (normalized * 255).astype(np.uint8)
             frame_resized_rgb = cv2.resize(frame_8bit_rgb, self.video_size, interpolation=cv2.INTER_LINEAR)
             frame_8bit_bgr = cv2.cvtColor(frame_resized_rgb, cv2.COLOR_RGB2BGR)
-            
-            # 放入 Queue，由 _record_worker_loop 負責寫入磁碟
             self.record_queue.put_nowait(frame_8bit_bgr)
         except queue.Full:
             logging.warning("Video Queue Full! Dropping frame.")

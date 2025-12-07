@@ -97,7 +97,7 @@ class ApiHandler:
                         metadata = self.cam_manager.picam2.capture_metadata()
                         exposure = metadata.get("ExposureTime", 10000); gain = metadata.get("AnalogueGain", 1.0)
                         duration = max(exposure, metadata.get("FrameDuration", exposure))
-                        controls = {"AeEnable": False, "ExposureTime": exposure, "AnalogueGain": gain, "FrameDurationLimits": (int(duration), int(duration))}
+                        controls = {"AeEnable": False, "ExposureTime": exposure, "AnalogueGain": gain,"FrameDurationLimits": (int(duration), int(duration)),"AwbEnable": False, "ColourGains": metadata.get("ColourGains", (1.0, 1.0)) }                       
                         QMetaObject.invokeMethod(cam_worker, "set_controls", Qt.QueuedConnection, Q_ARG(str, json.dumps(controls)))
                         QMetaObject.invokeMethod(self.cam_manager, "on_controls_locked", Qt.QueuedConnection, Q_ARG(str, json.dumps(controls)))
                         response_data["ae_enabled"] = False; response_data["current_gain"] = gain; response_data["current_exp_us"] = exposure
