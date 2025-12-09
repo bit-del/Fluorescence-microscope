@@ -39,15 +39,37 @@ def compute_score_fluo(image):
 
 def compute_score_bf(image):
     """
-    [明視野專用 - BF]
+    [明視野專用 - BF - Coarse]
     邏輯: Global Variance (全域變異數)
-    原因: 明視野正焦時黑色最深（對比度最高），變異數最大。
+    適用: 遠離焦點時，捕捉整體對比度變化。
     """
     if len(image.shape) == 3:
         image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
     # 計算全域變異數
     score = np.var(image)
+    return score
+
+def compute_score_bf_edge(image):
+    """
+    [明視野專用 - BF - Fine]
+    邏輯: Tenengrad (Sobel Gradient Magnitude Squared Mean)
+    適用: 接近焦點時，捕捉邊緣銳利度。
+    """
+    if len(image.shape) == 3:
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    
+    img_float = image.astype(np.float32)
+    
+    # 計算 Sobel 梯度
+    gx = cv2.Sobel(img_float, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(img_float, cv2.CV_32F, 0, 1, ksize=3)
+    
+    # 計算梯度幅值的平方 (Tenengrad)
+    magnitude_sq = gx**2 + gy**2
+    
+    # 取平均值作為分數
+    score = np.mean(magnitude_sq)
     return score
 
 class FocusAlgorithm:

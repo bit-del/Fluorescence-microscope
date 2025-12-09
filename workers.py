@@ -21,8 +21,8 @@ import config
 from image_processing import (get_raw_channels, apply_correction, 
                               convert_to_qimage, calculate_gain_maps)
 
-# 【修改】 引入修正後的函數名稱
-from autofocus import (FocusAlgorithm, compute_score_bf, compute_score_fluo) 
+# 【修改】 引入新的 compute_score_bf_edge
+from autofocus import (FocusAlgorithm, compute_score_bf, compute_score_fluo, compute_score_bf_edge) 
 from hardware_control import MotorConversion 
 
 class CameraWorker(QObject):
@@ -352,13 +352,32 @@ class CameraWorker(QObject):
                 image_for_calc = processed_rgb[:, :, 1]
                 self.af_image_count += 1
                 
-                # 【修改】 使用新名稱與變數
+                # 【修改】 明視野最後兩步使用 Edge Sharpness
                 if self.is_fluo_mode:
                     metric = compute_score_fluo(image_for_calc)
                     method_name = "Fluo"
                 else:
-                    metric = compute_score_bf(image_for_calc)
-                    method_name = "BF"
+                    total_steps = len(self.af_algorithm.steps_config)
+                    # current_step_index 已經在 _load_next_step 增加了，所以指向當前正在執行的步驟 (1-based from user perspective)
+                    # 但在列表中是 0-indexed。
+                    # 如果總共 3 步，steps_config index: 0, 1, 2
+                    # 執行第一步時: current_step_index = 1
+                    # 執行第二步時: current_step_index = 2
+                    # 執行第三步時: current_step_index = 3
+                    
+                    # 我們希望最後兩步 (index 1 和 2) 使用 Edge
+                    # 也就是 current_step_index > (total_steps - 2)
+                    # 假設 total=3:
+                    # step 1: current=1, 1 > 1 (False) -> BF Var
+                    # step 2: current=2, 2 > 1 (True) -> BF Edge
+                    # step 3: current=3, 3 > 1 (True) -> BF Edge
+                    
+                    if self.af_algorithm.current_step_index > (total_steps - 2):
+                        metric = compute_score_bf_edge(image_for_calc)
+                        method_name = "BF_Edge"
+                    else:
+                        metric = compute_score_bf(image_for_calc)
+                        method_name = "BF_Var"
 
                 g_copy_u8 = cv2.normalize(image_for_calc, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
                 self._queue_af_image_save(g_copy_u8, self.af_image_count)
