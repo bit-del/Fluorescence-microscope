@@ -69,6 +69,12 @@ class ApiHandler:
                     elif cmd == 'record':
                         if cam_worker.video_writer is None: cam_worker._start_recording_triggered = True; status_msg = "Rec Started"
                         else: cam_worker._stop_recording_triggered = True; status_msg = "Rec Stopped"
+                    
+                    # --- [新增] Z-Profile 啟動指令 ---
+                    elif cmd == 'start_z_profile':
+                        QMetaObject.invokeMethod(cam_worker, "start_z_stack_collection", Qt.QueuedConnection)
+                        status_msg = "Z-Stack Scan Started..."
+                    # ---------------------------------
                 
                 if cmd == 'light_bf':
                     self.light.set_light(self.light.bf_pin, not self.server.bf_light_state)
@@ -130,10 +136,9 @@ class ApiHandler:
                 elif cmd == 'start_protocol':
                     self._force_clear_folder(config.CAPTURE_FOLDER)
                     
-                    # 接收 grid_n, range_um 以及 mode
                     grid_n = params.get('grid_n', ['5'])[0]
                     range_um = params.get('range_um', ['1000'])[0]
-                    mode = params.get('mode', ['stitching'])[0] # 預設為 stitching
+                    mode = params.get('mode', ['stitching'])[0]
                     
                     QMetaObject.invokeMethod(
                         self.cam_manager.camera_worker, 
@@ -141,7 +146,7 @@ class ApiHandler:
                         Qt.QueuedConnection, 
                         Q_ARG(str, grid_n),
                         Q_ARG(str, range_um),
-                        Q_ARG(str, mode) # 傳遞 mode
+                        Q_ARG(str, mode)
                     )
                     status_msg = f"Protocol ({mode}, {grid_n}x{grid_n}) Started."
 

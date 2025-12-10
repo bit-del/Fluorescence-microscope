@@ -57,6 +57,10 @@
     /* 自動背景扣除按鈕的 "ON" 狀態顏色 (深青色) */
     button.bg-subtract-on { background-color: #008B8B; color: white; font-weight: bold; }
     
+    /* [新增] Z-Profile 按鈕樣式 (深橘色) */
+    button.z-profile-btn { background-color: #D35400; color: white; font-weight: bold; }
+    button.z-profile-btn:hover { background-color: #E67E22; }
+
     #steps_input { width: 60px; text-align: center; background-color: #5A5A5A; color: #F0F0F0; border: 1px solid #777; }
     #status-bar { position: fixed; bottom: 0; left: 0; width: 100%; background-color: #2D2D2D; padding: 5px 10px; font-size: 12px; }
     .motor-row { text-align: center; margin-bottom: 10px; }
@@ -155,6 +159,10 @@
                         </button>
 
                         <button id="autofocus-btn" class="autofocus" onclick="control('autofocus')">Run Auto Focus</button> 
+
+                        <button id="z-profile-btn" class="z-profile-btn" onclick="control('start_z_profile')">
+                            Run Z-Profile Scan (-2mm ~ +2mm)
+                        </button>
                         
                         <div class="toggle-row" style="margin-top: 10px; border-top: 1px solid #6E6E6E; padding-top: 10px;">
                             <label for="monitor-toggle">Monitor Focus (Anti-Drift)</label>
@@ -374,7 +382,6 @@
         if (cmd === 'set_manual_exposure') queryString += '&gain=' + params.gain + '&exp=' + params.exp;
         if (cmd === 'toggle_monitor') queryString += '&enabled=' + params.enabled;
         
-        // 傳遞 Protocol 參數
         if (cmd === 'start_protocol') {
             queryString += '&mode=' + params.mode + '&range_um=' + params.range_um + '&grid_n=' + params.grid_n;
         }
@@ -456,7 +463,6 @@
         document.getElementById('exp-input').value = 100;
         isBgSubtractOn = false;
         
-        // 初始化 Protocol 輸入監聽
         document.getElementById('protocol-range').addEventListener('input', updateCalcInfo);
         document.getElementById('protocol-grid').addEventListener('input', updateCalcInfo);
         updateProtocolPresets();

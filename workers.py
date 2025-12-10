@@ -11,6 +11,7 @@ from threading import Lock
 import threading 
 import math
 import shutil 
+import csv 
 
 from PySide6.QtCore import (QObject, QSize, Qt, Signal, Slot, QCoreApplication, 
                               QTimer, QEventLoop, QMetaObject, Q_ARG)
@@ -21,8 +22,8 @@ import config
 from image_processing import (get_raw_channels, apply_correction, 
                               convert_to_qimage, calculate_gain_maps)
 
-# 【修改】 引入新的 compute_score_bf_edge
-from autofocus import (FocusAlgorithm, compute_score_bf, compute_score_fluo, compute_score_bf_edge) 
+# 【修改】 引入 compute_score_tenengrad
+from autofocus import (FocusAlgorithm, compute_score_variance, compute_score_fluo, compute_score_brenner, compute_score_tenengrad) 
 from hardware_control import MotorConversion 
 
 class CameraWorker(QObject):
@@ -119,6 +120,18 @@ class CameraWorker(QObject):
         self.protocol_y_count = 0         
         self.center_offset_steps_x = 0
         self.center_offset_steps_y = 0
+
+        # --- Z-Stack 掃描專用變數 ---
+        self.z_stack_running = False
+        self.z_stack_state = "IDLE"
+        self.z_stack_folder = ""
+        self.z_stack_log = []     
+        self.z_stack_start_um = -2000.0
+        self.z_stack_end_um = 2000.0
+        self.z_stack_step_um = 20.0
+        self.z_stack_current_dist = 0.0
+        self.z_stack_counter = 0
+        self.z_stack_total_steps = 0
 
     def _load_raw_unmix_tensor(self):
         try:
@@ -324,6 +337,39 @@ class CameraWorker(QObject):
                 if ret: self.streaming_output.write(jpeg_buffer)
             except Exception as e: pass 
             
+            # --- Z-Stack 收集邏輯 ---
+            if self.z_stack_running:
+                if self.z_stack_state == "WAIT_FOR_FRAME":
+                    # 1. 儲存圖片 (轉為 8-bit 並套用 EV)
+                    filename = f"img_{self.z_stack_counter:04d}.jpg"
+                    full_path = os.path.join(self.z_stack_folder, filename)
+                    try:
+                        max_val = 65535.0
+                        normalized = processed_rgb.astype(np.float32) / max_val
+                        normalized *= self.ev_comp
+                        np.clip(normalized, 0, 1, out=normalized) 
+                        img_8bit = (normalized * 255).astype(np.uint8)
+                        img_bgr = cv2.cvtColor(img_8bit, cv2.COLOR_RGB2BGR)
+                        cv2.imwrite(full_path, img_bgr)
+                        
+                        current_pos_um = self.z_stack_current_dist
+                        self.z_stack_log.append((filename, current_pos_um))
+                        self.status_updated.emit(f"Z-Stack [{self.z_stack_counter}/{self.z_stack_total_steps}]: {current_pos_um:.1f}um saved.")
+                    except Exception as e:
+                        logging.error(f"Save Error: {e}")
+                    
+                    if self.z_stack_counter >= self.z_stack_total_steps:
+                        self._return_z_stack_center()
+                    else:
+                        self.z_stack_counter += 1
+                        self.z_stack_current_dist += self.z_stack_step_um
+                        steps = MotorConversion.um_to_microsteps_z(self.z_stack_step_um)
+                        self.z_stack_state = "MOVING_NEXT"
+                        self._issue_motor_command_for_z_stack(f"z{steps}")
+                
+                self._frame_processing = False
+                return 
+
             # 6. AF Logic
             if self.af_state == "IDLE":
                 if (self.monitor_focus_enabled and self.reference_focus_score > 100.0 and self.video_writer is None):
@@ -332,11 +378,11 @@ class CameraWorker(QObject):
                         self.monitor_counter = 0
                         image_for_calc = processed_rgb[:, :, 1]
                         
-                        # 【修改】 使用新名稱
                         if self.is_fluo_mode: 
                             curr_score = compute_score_fluo(image_for_calc)
                         else: 
-                            curr_score = compute_score_bf(image_for_calc)
+                            # Monitor 模式預設使用 Tenengrad
+                            curr_score = compute_score_tenengrad(image_for_calc)
                             
                         if curr_score < (self.reference_focus_score * self.drift_threshold):
                             self.status_updated.emit("Focus drift detected. Re-focusing...")
@@ -352,32 +398,34 @@ class CameraWorker(QObject):
                 image_for_calc = processed_rgb[:, :, 1]
                 self.af_image_count += 1
                 
-                # 【修改】 明視野最後兩步使用 Edge Sharpness
+                # --- 判斷粗/細調 ---
+                current_step = self.af_algorithm.current_step_index
+                total_steps = len(self.af_algorithm.steps_config)
+                
+                # 只有最後兩步 (N, N-1) 是細調，其餘為粗調
+                is_coarse = (current_step <= total_steps - 2)
+                
+                metric = 0.0
+                method_name = ""
+
                 if self.is_fluo_mode:
-                    metric = compute_score_fluo(image_for_calc)
-                    method_name = "Fluo"
-                else:
-                    total_steps = len(self.af_algorithm.steps_config)
-                    # current_step_index 已經在 _load_next_step 增加了，所以指向當前正在執行的步驟 (1-based from user perspective)
-                    # 但在列表中是 0-indexed。
-                    # 如果總共 3 步，steps_config index: 0, 1, 2
-                    # 執行第一步時: current_step_index = 1
-                    # 執行第二步時: current_step_index = 2
-                    # 執行第三步時: current_step_index = 3
-                    
-                    # 我們希望最後兩步 (index 1 和 2) 使用 Edge
-                    # 也就是 current_step_index > (total_steps - 2)
-                    # 假設 total=3:
-                    # step 1: current=1, 1 > 1 (False) -> BF Var
-                    # step 2: current=2, 2 > 1 (True) -> BF Edge
-                    # step 3: current=3, 3 > 1 (True) -> BF Edge
-                    
-                    if self.af_algorithm.current_step_index > (total_steps - 2):
-                        metric = compute_score_bf_edge(image_for_calc)
-                        method_name = "BF_Edge"
+                    if is_coarse:
+                        # 螢光粗調使用 Variance
+                        metric = compute_score_variance(image_for_calc) 
+                        method_name = "Fluo-Coarse(Var)"
                     else:
-                        metric = compute_score_bf(image_for_calc)
-                        method_name = "BF_Var"
+                        # 螢光細調使用 Fluo (Morph)
+                        metric = compute_score_fluo(image_for_calc) 
+                        method_name = "Fluo-Fine(Morph)"
+                else:
+                    if is_coarse:
+                        # 明視野粗調使用 Variance
+                        metric = compute_score_variance(image_for_calc) 
+                        method_name = "BF-Coarse(Var)"
+                    else:
+                        # 明視野細調使用 Tenengrad
+                        metric = compute_score_tenengrad(image_for_calc) 
+                        method_name = "BF-Fine(Tenengrad)"
 
                 g_copy_u8 = cv2.normalize(image_for_calc, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
                 self._queue_af_image_save(g_copy_u8, self.af_image_count)
@@ -446,7 +494,6 @@ class CameraWorker(QObject):
             self.af_algorithm.steps_config = config.FOCUS_STEPS_DRIFT; self._start_af_common()
     
     def _start_af_common(self):
-        # 【修改】 加入清除舊 AF 資料夾內容的邏輯
         try:
             if os.path.exists(self.af_folder):
                 files = glob.glob(os.path.join(self.af_folder, "*"))
@@ -468,6 +515,78 @@ class CameraWorker(QObject):
         if self.af_state != "IDLE":
             if self.motor_settle_timer and self.motor_settle_timer.isActive(): self.motor_settle_timer.stop()
             self.af_algorithm.cancel(); self.af_state = "IDLE"; self.af_status_finished.emit()
+
+    # --- Z-Stack 相關功能 ---
+    @Slot()
+    def start_z_stack_collection(self):
+        if self.z_stack_running or self.af_state != "IDLE":
+            logging.warning("Cannot start Z-Stack: System busy.")
+            return
+
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        self.z_stack_folder = os.path.join(config.CAPTURE_FOLDER, f"Z_Stack_{timestamp}")
+        os.makedirs(self.z_stack_folder, exist_ok=True)
+        logging.info(f"Starting Z-Stack Collection. Saving to: {self.z_stack_folder}")
+        
+        self.z_stack_running = True
+        self.z_stack_log = []
+        self.z_stack_counter = 0
+        
+        start_offset = -2000
+        total_range = 4000
+        step_size = 20
+        
+        self.z_stack_step_um = step_size
+        self.z_stack_total_steps = int(total_range / step_size)
+        self.z_stack_current_dist = start_offset 
+
+        self.z_stack_state = "MOVING_TO_START"
+        steps = MotorConversion.um_to_microsteps_z(start_offset)
+        
+        self.status_updated.emit(f"Z-Stack: Moving to start ({start_offset}um)...")
+        self._issue_motor_command_for_z_stack(f"z{steps}")
+
+    def _issue_motor_command_for_z_stack(self, command):
+        threading.Thread(target=self._z_stack_motor_thread, args=(command,)).start()
+
+    def _z_stack_motor_thread(self, command):
+        self.motor_control.send_command(command, silent=True)
+        time.sleep(0.4) 
+        QMetaObject.invokeMethod(self, "_on_z_stack_motor_settled", Qt.QueuedConnection)
+
+    @Slot()
+    def _on_z_stack_motor_settled(self):
+        if not self.z_stack_running: return
+
+        if self.z_stack_state == "MOVING_TO_START":
+            self.z_stack_state = "WAIT_FOR_FRAME" 
+            
+        elif self.z_stack_state == "MOVING_NEXT":
+            self.z_stack_state = "WAIT_FOR_FRAME" 
+            
+        elif self.z_stack_state == "RETURNING":
+            self.status_updated.emit(f"Z-Stack Complete. Saved {len(self.z_stack_log)} images.")
+            self._save_z_stack_csv() 
+            self.z_stack_running = False
+            self.z_stack_state = "IDLE"
+
+    def _save_z_stack_csv(self):
+        csv_path = os.path.join(self.z_stack_folder, "data_log.csv")
+        try:
+            with open(csv_path, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(['Filename', 'Position_um'])
+                writer.writerows(self.z_stack_log)
+            logging.info(f"Z-Stack log saved: {csv_path}")
+        except Exception as e:
+            logging.error(f"Failed to save CSV: {e}")
+
+    def _return_z_stack_center(self):
+        return_dist = -self.z_stack_current_dist
+        steps = MotorConversion.um_to_microsteps_z(return_dist)
+        self.status_updated.emit("Z-Stack: Returning to center...")
+        self.z_stack_state = "RETURNING"
+        self._issue_motor_command_for_z_stack(f"z{steps}")
             
     # --- Protocol Logic ---
     @Slot(str, str, str) 
@@ -476,10 +595,8 @@ class CameraWorker(QObject):
             try:
                 n_side = int(grid_n_str)
                 range_um = float(range_um_str)
-                
                 num_images = n_side * n_side
-                if n_side < 2: 
-                    raise ValueError("Grid size must be >= 2")
+                if n_side < 2: raise ValueError("Grid size must be >= 2")
                 
                 self.protocol_total_images = num_images
                 self.protocol_n_side = n_side
@@ -489,12 +606,10 @@ class CameraWorker(QObject):
                 return
 
             step_um = range_um / (n_side - 1)
-            
             logging.info(f"Protocol Start: Mode={mode_str}, Grid={n_side}x{n_side}, Range={range_um}um, Step={step_um:.2f}um")
 
             self.protocol_x_steps = MotorConversion.um_to_microsteps_xy(step_um) 
             self.protocol_y_steps = -MotorConversion.um_to_microsteps_xy(step_um) 
-            
             start_move_um = range_um / 2.0
             self.protocol_x_start_steps = -MotorConversion.um_to_microsteps_xy(start_move_um) 
             self.protocol_y_start_steps = MotorConversion.um_to_microsteps_xy(start_move_um) 

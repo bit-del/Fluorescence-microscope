@@ -8,8 +8,8 @@ import cv2
 
 def compute_score_fluo(image):
     """
-    [螢光專用 - Fluo] 
-    邏輯: Morphological Opening (去鬼影) + Sobel Edge Detection
+    [螢光細調 - Fluo Fine] 
+    邏輯: Morphological Opening (去鬼影) + Sobel Edge + Top 0.1% Peaks
     """
     img_float = image.astype(np.float32)
 
@@ -37,11 +37,11 @@ def compute_score_fluo(image):
 
     return score
 
-def compute_score_bf(image):
+def compute_score_variance(image):
     """
-    [明視野專用 - BF - Coarse]
+    [通用粗調 - Variance]
     邏輯: Global Variance (全域變異數)
-    適用: 遠離焦點時，捕捉整體對比度變化。
+    適用: 明視野粗調 & 螢光粗調 (快速找大致位置)
     """
     if len(image.shape) == 3:
         image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -50,26 +50,32 @@ def compute_score_bf(image):
     score = np.var(image)
     return score
 
-def compute_score_bf_edge(image):
+def compute_score_brenner(image):
     """
-    [明視野專用 - BF - Fine]
-    邏輯: Tenengrad (Sobel Gradient Magnitude Squared Mean)
-    適用: 接近焦點時，捕捉邊緣銳利度。
+    [明視野細調 - Brenner] (備用)
+    邏輯: 水平方向相隔兩點的差分平方和
     """
-    if len(image.shape) == 3:
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    
+    img_float = image.astype(np.float32)
+    diff_x = img_float[:, 2:] - img_float[:, :-2]
+    score = np.mean(diff_x ** 2)
+    return score
+
+def compute_score_tenengrad(image):
+    """
+    [明視野細調 - Tenengrad]
+    邏輯: Sobel 梯度平方和 (Gradient Magnitude Squared)
+    特點: 經典對焦演算法，對邊緣敏感且比 Brenner 更全面 (考慮 X 和 Y 方向)
+    """
     img_float = image.astype(np.float32)
     
-    # 計算 Sobel 梯度
+    # 計算 X 和 Y 方向的 Sobel 梯度
     gx = cv2.Sobel(img_float, cv2.CV_32F, 1, 0, ksize=3)
     gy = cv2.Sobel(img_float, cv2.CV_32F, 0, 1, ksize=3)
     
-    # 計算梯度幅值的平方 (Tenengrad)
-    magnitude_sq = gx**2 + gy**2
+    # 梯度平方和 (Energy)
+    gradient_sq = gx**2 + gy**2
+    score = np.mean(gradient_sq)
     
-    # 取平均值作為分數
-    score = np.mean(magnitude_sq)
     return score
 
 class FocusAlgorithm:
@@ -113,8 +119,7 @@ class FocusAlgorithm:
         self.current_step_config = self.steps_config[self.current_step_index]
         self.current_step_index += 1
         
-        # 反轉方向：利用這一點，如果在上一步結束時我們剛好在峰值旁邊（Back 1 step），
-        # 反轉後就會直接朝峰值移動。
+        # 反轉方向 (這對於 70% 掉落後直接進入下一步很重要，可以往回找)
         self.direction *= -1
         self.last_value = 0
         self.maximum_value = -1 
@@ -161,7 +166,7 @@ class FocusAlgorithm:
             if current_value < self.last_value:
                 self.drop_count += 1
                 
-                # --- 情況 A: 剛開始就走錯方向 (Step 1 專用) ---
+                # --- 情況 A: 剛開始就走錯方向 ---
                 if (check_threshold and self.current_step_index == 1 and self.drop_count == 1 and not self.wrong_way_check_done): 
                     self.wrong_way_check_done = True 
                     self.direction *= -1 
@@ -174,32 +179,37 @@ class FocusAlgorithm:
                     self.status_updater(f"AF: Wrong direction. Reversing...")
                     return {"type": "MOVE", "command": command}
 
-                # --- 情況 B: 分數暴跌 (>30%) ---
+                # --- 情況 B: 分數暴跌 (70%) ---
+                # [修改]: 直接進入下一個步數
                 elif (check_threshold and self.maximum_value > 0 and (current_value / self.maximum_value) < 0.7):
+                    
                     if is_last_step:
-                        # 最後一步：必須精確回到峰值
+                        # 備註: 如果是"最後一步"發生暴跌，通常還是建議回到峰值，不然會停在模糊處。
+                        # 但依照您的指示若要統一行為，也可以直接結束。
+                        # 這裡保留安全性：如果是最後一步，還是回到峰值；如果不是，則進入下一步。
                         back_steps = self.steps_from_peak  
                         step = step_size * self.direction * -1 * back_steps
                         msg = f"AF: Final Step Drop (70%). Back to Peak ({back_steps} steps)."
+                        command = f"z{step}"
+                        self.status_updater(msg)
+                        self.state = self.STATE_STEPPING_BACK
+                        return {"type": "MOVE", "command": command}
                     else:
-                        # 中間步驟：只要退回上一步 (Back 1 step)
-                        step = step_size * self.direction * -1
-                        msg = f"AF: Peak missed (70% Drop). Back 1 step to refine."
-
-                    command = f"z{step}"
-                    self.status_updater(msg)
-                    self.state = self.STATE_STEPPING_BACK 
-                    return {"type": "MOVE", "command": command}
+                        # 非最後一步：直接切換狀態到 START_STEP
+                        # 下一次 step() 呼叫時會載入下一層設定 (並反轉方向)
+                        msg = f"AF: Drop detected (70%). Cut off and directly entering next step."
+                        self.status_updater(msg)
+                        self.state = self.STATE_START_STEP
+                        return {"type": "WAIT"}
 
                 # --- 情況 C: 連續下降兩次 ---
+                # [保留]: 回去一步 (或回到峰值)
                 elif self.drop_count >= 2:
                     if is_last_step:
-                        # 最後一步：必須精確回到峰值
                         back_steps = self.steps_from_peak
                         step = step_size * self.direction * -1 * back_steps
                         msg = f"AF: Final Step (2 drops). Back to Peak ({back_steps} steps)."
                     else:
-                        # 中間步驟：只要退回上一步 (Back 1 step)
                         step = step_size * self.direction * -1
                         msg = f"AF: Peak passed (2 drops). Back 1 step to refine."
                     
